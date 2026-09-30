@@ -37,6 +37,11 @@
 //! metadata and category management without exposing stake withdrawal or
 //! ownership transfer. Managers are intentionally limited to the metadata and
 //! category entry points; the value-moving entry points remain owner-only.
+//!
+//! The admin surface is also part of the exported interface: `is_admin` lets a
+//! caller answer "is this address an admin?" without downloading the whole
+//! admin set via `get_admins()`. It must be safe to call before `initialize`,
+//! returning `false` rather than erroring on an uninitialised contract.
 
 use soroban_sdk::testutils::Address as _;
 use soroban_sdk::xdr::{ScSpecEntry, ScSpecTypeDef, ScSpecUdtUnionCaseV0};
@@ -175,6 +180,12 @@ fn render_interface(entries: &[ScSpecEntry]) -> String {
 /// reviewed alongside `registry/interface.snap`.
 const _DELEGATION_SURFACE: &[&str] = &["set_manager", "manager", "revoke_manager"];
 
+/// The admin surface is part of the exported interface: consumers must be able
+/// to test membership in the admin set without fetching it. Any change to this
+/// signature is a breaking change and must be reviewed alongside
+/// `registry/interface.snap`.
+const _ADMIN_SURFACE: &[&str] = &["is_admin"];
+
 #[test]
 fn exported_interface_matches_snapshot() {
     let wasm_path = manifest_path(&[
@@ -198,6 +209,14 @@ fn exported_interface_matches_snapshot() {
             actual.contains(&format!("fn {expected_fn}(")),
             "delegation entry point `{expected_fn}` is missing from the exported interface; \
              the owner-delegated manager surface must remain part of the contract spec"
+        );
+    }
+
+    for expected_fn in _ADMIN_SURFACE {
+        assert!(
+            actual.contains(&format!("fn {expected_fn}(")),
+            "admin entry point `{expected_fn}` is missing from the exported interface; \
+             callers must be able to test admin membership without fetching the whole set"
         );
     }
 
@@ -232,6 +251,33 @@ fn exported_interface_matches_snapshot() {
          {UPDATE_ENV}=1 cargo test --test interface\n\n\
          and commit registry/interface.snap with it.\n"
     );
+}
+
+/// `is_admin` must agree with membership in `get_admins()`, and must be safe to
+/// call on a contract that has not been initialised yet (returning `false`
+/// rather than trapping).
+#[test]
+fn is_admin_matches_get_admins_and_is_safe_before_initialize() {
+    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::Address;
+
+    let env = Env::default();
+    env.mock_all_auths();
+    let registry_id = env.register(crate::Registry, ());
+    let registry = crate::RegistryClient::new(&env, &registry_id);
+    let stranger = Address::generate(&env);
+
+    // Before `initialize`, the contract has no admin set; the query must not
+    // trap and must report non-membership.
+    assert!(!registry.is_admin(&stranger));
+
+    let owner = Address::generate(&env);
+    let admin = Address::generate(&env);
+    registry.initialize(&owner, &admin);
+
+    assert!(registry.is_admin(&admin));
+    assert!(!registry.is_admin(&stranger));
+    assert!(registry.get_admins().contains(&admin));
 }
 
 /// A token contract that reenters the registry during `transfer`, attempting
